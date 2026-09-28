@@ -1,4 +1,7 @@
+import type { JsonValue } from "./json-data.js";
 export interface StepContext {
+  input: JsonValue;
+  outputs: Record<string, JsonValue>;
   executionId: string;
   stepName: string;
   attempt: number;
@@ -15,11 +18,13 @@ export interface RetryPolicy {
 
 export interface WorkflowStep {
   name: string;
-  execute: (context: StepContext) => Promise<void>;
+  execute: (context: StepContext) => Promise<JsonValue | void>;
   retry?: RetryPolicy;
 }
 
 export interface WorkflowDefinition {
+  version?: number;
+  validateInput?: (input: JsonValue) => void;
   name: string;
   steps: WorkflowStep[];
 }
@@ -28,9 +33,12 @@ export type ExecutionStatus =
   | "pending"
   | "running"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled"
+  | "timed_out";
 
 export interface StepExecution {
+  output?: JsonValue;
   name: string;
   status: ExecutionStatus;
   attempts: number;
@@ -40,6 +48,11 @@ export interface StepExecution {
 }
 
 export interface WorkflowExecution {
+  workflowVersion?: number;
+  retryCount?: number;
+  timeoutMs?: number;
+  deadlineAt?: string;
+  input?: JsonValue;
   id: string;
   workflowName: string;
   status: ExecutionStatus;

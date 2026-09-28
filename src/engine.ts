@@ -1,3 +1,5 @@
+import { ExecutionCancelledError } from "./cancellation-error.js";
+import { jsonSnapshot, type JsonValue } from "./json-data.js";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { ExecutionBusyError, RetryableError } from "./errors.js";
@@ -8,6 +10,8 @@ import { createPendingExecution, MAX_TIMER_MS, retryPolicyFor, validateWorkflowD
 import type { WorkflowDefinition, WorkflowExecution } from "./types.js";
 
 export interface RunOptions {
+  timeoutMs?: number;
+  input?: JsonValue;
   leaseMs?: number;
   signal?: AbortSignal;
 }
@@ -18,7 +22,7 @@ export interface ClaimedRunOptions {
 
 function executionPlan(workflow: WorkflowDefinition, execution: WorkflowExecution) {
   validateWorkflowDefinition(workflow);
-  if (execution.workflowName !== workflow.name || execution.steps.length !== workflow.steps.length) {
+  if (execution.workflowName !== workflow.name || (execution.workflowVersion ?? 1) !== (workflow.version ?? 1) || execution.steps.length !== workflow.steps.length) {
     throw new Error("Saved execution does not match this workflow definition.");
   }
   return workflow.steps.map((step, index) => {
@@ -46,7 +50,7 @@ export async function runWorkflow(
   validateLeaseOptions(ownerId, leaseMs);
   options.signal?.throwIfAborted();
 
-  const initial = savedExecution ?? createPendingExecution(workflow);
+  const initial = savedExecution ?? createPendingExecution(workflow, options.input, options.timeoutMs);
   executionPlan(workflow, initial);
   if (!savedExecution) await saveExecution(initial);
 
@@ -54,14 +58,14 @@ export async function runWorkflow(
   const current = await loadExecution(initial.id);
   if (!current) throw new Error("Execution no longer exists.");
   executionPlan(workflow, current);
-  if (current.status === "completed") {
-    console.log(`Execution already completed: ${current.id}`);
+  if (current.status === "completed" || current.status === "cancelled" || current.status === "timed_out") {
+    console.log(`Execution already terminal: ${current.id}`);
     return current;
   }
   const lease = await claimExecution(current.id, ownerId, leaseMs);
   if (!lease) {
     const latest = await loadExecution(current.id);
-    if (latest?.status === "completed") return latest;
+    if (latest?.status === "completed" || latest?.status === "cancelled" || latest?.status === "timed_out") return latest;
     throw new ExecutionBusyError(current.id);
   }
   return runClaimedWorkflow(workflow, lease, {
@@ -100,7 +104,7 @@ export async function runClaimedWorkflow(
       throw error;
     }
 
-    if (execution.status === "completed") return execution;
+    if (execution.status === "completed" || execution.status === "cancelled" || execution.status === "timed_out") return execution;
     execution.status = "running";
     delete execution.error;
     await checkpoint();
@@ -140,6 +144,7 @@ export async function runClaimedWorkflow(
         signal.throwIfAborted();
         record.status = "running";
         record.attempts += 1;
+        delete record.output;
         delete record.error;
         delete record.nextAttemptAt;
         await checkpoint();
@@ -147,10 +152,13 @@ export async function runClaimedWorkflow(
 
         try {
           signal.throwIfAborted();
-          await step.execute({
+          const output = await step.execute({
+            input: jsonSnapshot(execution.input ?? null),
+            outputs: Object.fromEntries(execution.steps.slice(0, index).filter(previous => previous.status === "completed" && previous.output !== undefined).map(previous => [previous.name, jsonSnapshot(previous.output!)])),
             executionId: execution.id, stepName: step.name,
             attempt: record.attempts, idempotencyKey: `${execution.id}:${index}`, signal,
           });
+          if (output !== undefined) record.output = jsonSnapshot(output);
         } catch (error: unknown) {
           // Ownership loss and shutdown are not business failures or retries.
           signal.throwIfAborted();
@@ -183,6 +191,12 @@ export async function runClaimedWorkflow(
     await checkpoint();
     console.log(`Completed workflow: ${execution.workflowName}`);
     return execution;
+  } catch (error) {
+    if (error instanceof ExecutionCancelledError || signal.reason instanceof ExecutionCancelledError) {
+      const cancelled = await loadExecution(lease.executionId);
+      if (cancelled?.status === "cancelled" || cancelled?.status === "timed_out") return cancelled;
+    }
+    throw error;
   } finally {
     // Only reached after the handler settles. Never free ownership underneath it.
     await session.stop();

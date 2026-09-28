@@ -1,7 +1,7 @@
 {
   "name": "workflow-engine",
   "version": "1.0.0",
-  "description": "",
+  "description": "Durable PostgreSQL workflow engine with versioned execution, retries, cancellation and authenticated HTTP integration",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -15,7 +15,13 @@
     "executions:enqueue": "tsx src/enqueue.ts",
     "worker": "tsx src/start-worker.ts",
     "api": "tsx src/start-api.ts",
-    "test:api": "tsx --test tests/api.test.ts"
+    "test:api": "tsx --test tests/api.test.ts",
+    "setup": "node scripts/setup.mjs",
+    "migrate": "tsx src/migrate.ts",
+    "migrate:prod": "node dist/migrate.js",
+    "start:api": "node dist/start-api.js",
+    "start:worker": "node dist/start-worker.js",
+    "example": "node examples/client.mjs"
   },
   "keywords": [],
   "author": "",

@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { pool } from "../../src/database.js";
 import { runWorkflow } from "../../src/engine.js";
@@ -13,11 +14,13 @@ if (mode !== "retry" && mode !== "effect") throw new Error("Unknown fixture mode
 const workflow: WorkflowDefinition = {
   name: "process-recovery-test",
   steps: [
-    { name: "reserve", execute: async () => { console.log("RESERVE_EXECUTED"); } },
+    { name: "reserve", execute: async () => { console.log("RESERVE_EXECUTED"); return { reservationId: "R-1" }; } },
     {
       name: "pay",
       retry: { maxAttempts: 3, initialDelayMs: 1_200, maxDelayMs: 1_200 },
       execute: async (context) => {
+        assert.deepEqual(context.input, { orderId: "restart-order" });
+        assert.deepEqual(context.outputs.reserve, { reservationId: "R-1" });
         console.log("ATTEMPT_START", context.attempt, Date.now());
         const paymentId = await createSimulatedPayment(context.idempotencyKey);
         console.log("PAYMENT_ID", paymentId);
@@ -34,7 +37,7 @@ const workflow: WorkflowDefinition = {
 try {
   const saved = id ? await loadExecution(id) : undefined;
   if (id && !saved) throw new Error("Missing fixture execution.");
-  const result = await runWorkflow(workflow, saved, { leaseMs: 1_000 });
+  const result = await runWorkflow(workflow, saved, { leaseMs: 1_000, input: { orderId: "restart-order" } });
   console.log("FIXTURE_DONE", result.id, result.status);
   if (result.status !== "completed") process.exitCode = 1;
 } finally {

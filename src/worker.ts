@@ -1,3 +1,5 @@
+import { startWorkerPresence } from "./worker-presence.js";
+import { definitionKey } from "./versioning.js";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { runClaimedWorkflow } from "./engine.js";
@@ -25,18 +27,20 @@ export async function runWorker(options: WorkerOptions = {}): Promise<void> {
   }
   const definitions = options.workflows ?? listWorkflows();
   for (const workflow of definitions) validateWorkflowDefinition(workflow);
-  const workflows = new Map(definitions.map((workflow) => [workflow.name, workflow]));
+  const workflows = new Map(definitions.map((workflow) => [definitionKey(workflow.name, workflow.version), workflow]));
   if (workflows.size !== definitions.length) throw new Error("Workflow names must be unique.");
   const signal = options.signal ?? new AbortController().signal;
   console.log("Worker started:", workerId);
 
+  const stopPresence = await startWorkerPresence(workerId);
+  try {
   while (!signal.aborted) {
     let processed = false;
     try {
-      const lease = await claimNextExecution(workerId, [...workflows.keys()], leaseMs);
+      const lease = await claimNextExecution(workerId, definitions.map(w => w.name), leaseMs, definitions.map(w => ({ name: w.name, version: w.version ?? 1 })));
       if (lease) {
         processed = true;
-        const workflow = workflows.get(lease.workflowName)!;
+        const workflow = workflows.get(definitionKey(lease.workflowName, lease.workflowVersion))!;
         console.log(`Worker ${workerId} claimed ${lease.executionId} (generation ${lease.token}).`);
         const result = await runClaimedWorkflow(workflow, lease, { yieldOnRetry: true, signal });
         console.log(`Worker ${workerId} saved ${result.id}: ${result.status}.`);
@@ -53,5 +57,6 @@ export async function runWorker(options: WorkerOptions = {}): Promise<void> {
       catch (error) { if (!signal.aborted) throw error; }
     }
   }
+  } finally { await stopPresence(); }
   console.log("Worker stopped:", workerId);
 }

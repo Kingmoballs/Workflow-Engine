@@ -1,0 +1,4 @@
+BEGIN;
+ALTER TABLE workflow_executions ADD COLUMN IF NOT EXISTS input JSONB;
+ALTER TABLE step_executions ADD COLUMN IF NOT EXISTS output JSONB;
+COMMIT;

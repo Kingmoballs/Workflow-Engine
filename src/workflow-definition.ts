@@ -1,3 +1,6 @@
+import { validateVersion } from "./versioning.js";
+import { validateTimeout } from "./timeout-options.js";
+import { jsonSnapshot, type JsonValue } from "./json-data.js";
 import { randomUUID } from "node:crypto";
 import type { RetryPolicy, WorkflowDefinition, WorkflowExecution, WorkflowStep } from "./types.js";
 
@@ -16,8 +19,12 @@ export function retryPolicyFor(step: WorkflowStep): RetryPolicy {
 }
 
 export function validateWorkflowDefinition(workflow: WorkflowDefinition): void {
+  validateVersion(workflow.version);
   if (!workflow.name.trim()) throw new Error("Workflow name must not be empty.");
+  const names = new Set<string>();
   for (const step of workflow.steps) {
+    if (names.has(step.name)) throw new Error("Step names must be unique.");
+    names.add(step.name);
     if (!step.name.trim() || typeof step.execute !== "function") {
       throw new Error("Every step needs a name and an execute function.");
     }
@@ -25,9 +32,15 @@ export function validateWorkflowDefinition(workflow: WorkflowDefinition): void {
   }
 }
 
-export function createPendingExecution(workflow: WorkflowDefinition): WorkflowExecution {
+export function createPendingExecution(workflow: WorkflowDefinition, input: JsonValue = null, timeoutMs?: number): WorkflowExecution {
   validateWorkflowDefinition(workflow);
+  validateTimeout(timeoutMs);
+  const snapshot = jsonSnapshot(input);
+  workflow.validateInput?.(jsonSnapshot(snapshot));
   return {
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    workflowVersion: workflow.version ?? 1,
+    input: snapshot,
     id: randomUUID(), workflowName: workflow.name, status: "pending",
     steps: workflow.steps.map((step) => ({ name: step.name, status: "pending", attempts: 0 })),
   };

@@ -20,7 +20,7 @@ async function resumeLatestExecution(): Promise<void> {
 
     console.log(`Resuming execution: ${savedExecution.id}`);
     const execution = await runWorkflow(
-      getWorkflow(savedExecution.workflowName),
+      getWorkflow(savedExecution.workflowName, savedExecution.workflowVersion ?? 1),
       savedExecution,
     );
     console.dir(execution, { depth: null });

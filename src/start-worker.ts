@@ -1,5 +1,5 @@
 import { pool } from "./database.js";
-import { getWorkflow } from "./workflow-registry.js";
+import { listWorkflows } from "./workflow-registry.js";
 import { runWorker, type WorkerOptions } from "./worker.js";
 
 async function main(): Promise<void> {
@@ -14,7 +14,8 @@ async function main(): Promise<void> {
     else if (arg === "--workflow") {
       const name = args[++index];
       if (!name) throw new Error("--workflow requires a name.");
-      options.workflows = [getWorkflow(name)];
+      options.workflows = listWorkflows().filter(workflow => workflow.name === name);
+      if (!options.workflows.length) throw new Error("Unknown workflow: " + name);
     }
     else if (arg === "--worker-id") {
       const id = args[++index];

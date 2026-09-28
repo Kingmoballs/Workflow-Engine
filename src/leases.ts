@@ -1,9 +1,13 @@
+import { expireExecution, expireLockedExecution, expireOverdueExecutions } from "./deadlines.js";
+import { ExecutionTimedOutError } from "./timeout-options.js";
+import { ExecutionCancelledError } from "./cancellation-error.js";
 import { performance } from "node:perf_hooks";
 import { pool } from "./database.js";
 
 export interface ExecutionLease {
   executionId: string;
   workflowName: string;
+  workflowVersion?: number;
   ownerId: string;
   token: string;
   durationMs: number;
@@ -14,6 +18,7 @@ export interface ExecutionLease {
 interface LeaseRow {
   id: string;
   workflow_name: string;
+  workflow_version: number;
   lease_owner: string;
   lease_generation: string;
 }
@@ -27,7 +32,7 @@ export function validateLeaseOptions(ownerId: string, durationMs: number): void 
 
 function leaseFrom(row: LeaseRow, durationMs: number, started: number): ExecutionLease {
   return {
-    executionId: row.id, workflowName: row.workflow_name,
+    executionId: row.id, workflowName: row.workflow_name, workflowVersion: row.workflow_version,
     ownerId: row.lease_owner, token: row.lease_generation,
     durationMs, localDeadline: started + durationMs,
   };
@@ -37,16 +42,19 @@ export async function claimNextExecution(
   ownerId: string,
   workflowNames: string[],
   durationMs = 30_000,
+  definitions = workflowNames.map(name => ({ name, version: 1 })),
 ): Promise<ExecutionLease | undefined> {
   validateLeaseOptions(ownerId, durationMs);
   if (!workflowNames.length) return undefined;
+  await expireOverdueExecutions();
   const started = performance.now();
   const result = await pool.query<LeaseRow>(
     `
       WITH candidate AS (
         SELECT w.id FROM workflow_executions w
         WHERE w.status IN ('pending', 'running')
-          AND w.workflow_name = ANY($2::text[])
+          AND (w.deadline_at IS NULL OR w.deadline_at > clock_timestamp())
+          AND EXISTS (SELECT 1 FROM jsonb_to_recordset($2::jsonb) AS d(name text, version integer) WHERE d.name=w.workflow_name AND d.version=w.workflow_version)
           AND (w.lease_expires_at IS NULL OR w.lease_expires_at <= clock_timestamp())
           AND COALESCE((
             SELECT s.next_attempt_at <= clock_timestamp()
@@ -64,9 +72,9 @@ export async function claimNextExecution(
           status = 'running', updated_at = clock_timestamp()
       FROM candidate
       WHERE w.id = candidate.id
-      RETURNING w.id, w.workflow_name, w.lease_owner, w.lease_generation
+      RETURNING w.id, w.workflow_name, w.workflow_version, w.lease_owner, w.lease_generation
     `,
-    [ownerId, workflowNames, durationMs],
+    [ownerId, JSON.stringify(definitions), durationMs],
   );
   const row = result.rows[0];
   return row ? leaseFrom(row, durationMs, started) : undefined;
@@ -78,12 +86,14 @@ export async function claimExecution(
   durationMs = 30_000,
 ): Promise<ExecutionLease | undefined> {
   validateLeaseOptions(ownerId, durationMs);
+  await expireExecution(executionId);
   const started = performance.now();
   const result = await pool.query<LeaseRow>(
     `
       WITH candidate AS (
         SELECT id FROM workflow_executions
         WHERE id = $1 AND status IN ('pending', 'running', 'failed')
+          AND (deadline_at IS NULL OR deadline_at > clock_timestamp())
           AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
         FOR UPDATE SKIP LOCKED
       )
@@ -93,7 +103,7 @@ export async function claimExecution(
           lease_expires_at = clock_timestamp() + $3::double precision * INTERVAL '1 millisecond',
           status = 'running', updated_at = clock_timestamp()
       FROM candidate WHERE w.id = candidate.id
-      RETURNING w.id, w.workflow_name, w.lease_owner, w.lease_generation
+      RETURNING w.id, w.workflow_name, w.workflow_version, w.lease_owner, w.lease_generation
     `,
     [executionId, ownerId, durationMs],
   );
@@ -108,7 +118,13 @@ export async function renewLease(lease: ExecutionLease): Promise<number | undefi
     await client.query("BEGIN");
     await client.query("SET LOCAL lock_timeout = '2s'");
     // Re-check expiry AFTER obtaining the row lock, not before waiting for it.
-    await client.query("SELECT id FROM workflow_executions WHERE id = $1 FOR UPDATE", [lease.executionId]);
+    const locked = await client.query<{ status: string }>("SELECT status FROM workflow_executions WHERE id = $1 FOR UPDATE", [lease.executionId]);
+    if (await expireLockedExecution(client, lease.executionId)) {
+      await client.query("COMMIT");
+      throw new ExecutionTimedOutError();
+    }
+    if (locked.rows[0]?.status === "timed_out") throw new ExecutionTimedOutError();
+    if (locked.rows[0]?.status === "cancelled") throw new ExecutionCancelledError();
     const renewed = await client.query(
       `
         UPDATE workflow_executions

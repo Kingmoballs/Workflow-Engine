@@ -1,3 +1,4 @@
+import { ExecutionCancelledError } from "./cancellation-error.js";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { LeaseLostError } from "./errors.js";
@@ -28,7 +29,7 @@ export function startLeaseSession(lease: ExecutionLease, externalSignal?: AbortS
   const heartbeat = (async () => {
     try {
       while (!stopped.signal.aborted && !lost.signal.aborted) {
-        await delay(Math.max(25, Math.floor(lease.durationMs / 3)), undefined, { signal: stopped.signal });
+        await delay(Math.max(25, Math.min(250, Math.floor(lease.durationMs / 3))), undefined, { signal: stopped.signal });
         if (stopped.signal.aborted || lost.signal.aborted) break;
         const deadline = await renewLease(lease);
         if (deadline === undefined) {
@@ -39,7 +40,7 @@ export function startLeaseSession(lease: ExecutionLease, externalSignal?: AbortS
       }
     } catch (error) {
       if (!stopped.signal.aborted) {
-        lost.abort(new LeaseLostError("Could not renew execution ownership.", { cause: error }));
+        lost.abort(error instanceof ExecutionCancelledError ? error : new LeaseLostError("Could not renew execution ownership.", { cause: error }));
       }
     }
   })();
